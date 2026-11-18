@@ -1,14 +1,15 @@
-%Created by CherryScallion, Oct.2026
+%Created by Shiye Jiang, Oct. to Nov.2026
 %%%%%%%
-function GaborSearchRIFT(subNo, EL, ProPixx)
+function GaborSearchRIFT(subNo, EL, ProPixx, useTrigger)
 
 %% Sub ID Input
 if nargin == 0 % if no input arguments, ask for subID
-    promptParams = {'Subject ID', 'EL(0:No, 1:Yes)', 'ProPixx' };
-    settings = inputdlg(promptParams, 'settings', 1, {'100', '0','0'});
+    promptParams = {'Subject ID', 'EL(0:No, 1:Yes)', 'ProPixx', 'Use Trigger'};
+    settings = inputdlg(promptParams, 'settings', 1, {'100', '0','0','0'});
     subNo = str2double(settings{1});
     EL = str2double(settings{2});
     ProPixx = str2double(settings{3}); % default to ProPixx enabled
+    useTrigger = str2double(settings{4}); % default to useTrigger disabled
 end
 
 AssertOpenGL;
@@ -17,18 +18,10 @@ Screen('Preference', 'SkipSyncTests', 1); % skip sync tests
 rng('shuffle'); % shuffle random number generator
 %% Create and open data file
 % Create data folder and path
-if ProPixx == 1
-    initProPixx(1);
-end
 
 %% Open params
 [params, gaborPat] = defineParameters();
-% dva calculation
 Resolution = params.screenResolution;
-width = params.screenWidth;
-height = params.screenHeight;
-dva = 2*atand((width/2)/params.distance);
-dva2pixels = @(inputDva) inputDva .* Resolution(1) ./ dva;
 
 colVec = params.colVec; %color wheel
 bgColor = params.bgColor; %background color
@@ -44,7 +37,6 @@ nTrial = nSearch;
 % define paths for data storage
 currentFileFolder = fileparts(mfilename('fullpath'));
 dataFolder = fullfile(currentFileFolder, '..', 'data');
-targetFolder = fullfile(currentFileFolder, 'search'); % ?
 GaborFolder = fullfile(dataFolder, 'GaborSearch');
 saveFolder = fullfile(GaborFolder, 'Behavioral');
 saveFolderEL = fullfile(GaborFolder, 'EL');
@@ -54,16 +46,58 @@ end
 if ~exist(saveFolderEL, 'dir')
     mkdir(saveFolderEL);
 end
-TimingFilename = fullfile(saveFolder, sprintf('S%03d_StimulusTiming.csv', subNo));
-addpath(targetFolder)
+% Add the organized component folders to the MATLAB path.
+componentFolders = {'Params', 'General_Componets', 'Task_Components'};
+for iFolder = 1:numel(componentFolders)
+    addpath(fullfile(currentFileFolder, componentFolders{iFolder}));
+end
 addpath(dataFolder)
 
-el = [];
-eyelinkInitialized = false;
-eyelinkFileOpen = false;
-eyelinkRecording = false;
-edfFile = '';
-edfPath = '';
+edfActive = false;
+
+%% Trigger device setup
+
+if useTrigger == 1
+    clear device
+    device_found = 0;
+    device = [];
+    ports = serialportlist("available");
+    for p = 1:length(ports)
+        try
+            temp_dev = serialport(ports(p), 9600, "Timeout", 1);
+            temp_dev.flush();
+
+            write(temp_dev, "_c1", "char");
+            query_return = read(temp_dev, 5, "char");
+            display(query_return);
+
+            if ~isempty(query_return) && query_return == "_xid0"
+                device = temp_dev;
+                device_found = 1;
+                fprintf('XID Device found on port: %s\n', ports(p));
+                break;
+            else
+                clear temp_dev;
+            end
+
+        catch
+            continue;
+        end
+    end
+
+    if ~device_found
+        error(['CRITICAL ERROR: XID Device not found. ' ...
+            'For formal data collection, the trigger device is required. ' ...
+            'Check connection or set is_debug=1.']);
+    end
+
+    setPulseDuration(device, 30);
+else
+    warning('DEBUG MODE: experiment will continue without XID triggers.');
+    device = [];
+end
+
+
 
 try
     screens = max(Screen('Screens'));
@@ -74,33 +108,28 @@ try
     Screen('BlendFunction',w,GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA); 
     ifi = Screen('GetFlipInterval',w); %inter flip interval
 
-    % Convert visual angle to pixels using configured screen dimensions.
-    ppd = dva2pixels(1);
+    ppd = angle2pixel(1, Resolution(1), params);
 
     % Font size and font type
-    fontSizeP = round(ppd*params.fontSize,0);
+    fontSizeP = angle2pixel(params.fontSize, Resolution(1), params);
     Screen('TextFont',w,'Arial');
     Screen('TextSize',w,fontSizeP);
 
     %stimsize calculation 
-    stimSizeP = ppd * params.stimSize;
+    stimSizeP = angle2pixel(params.stimSize, Resolution(1), params);
  
     baseRect = [0 0 stimSizeP stimSizeP];
-    fixRect = [0 0 ppd*params.d1 ppd*params.d1];
-    centerRect = round(CenterRectOnPointd(baseRect, cx, cy));
 
-    %Eyelink and fixation box size
-    ELBox = round(ppd, 0);
-    fixBox = round(ppd * 1.75, 0);
-    fixDiag = ((ppd*params.d1+fixBox*2)*sqrt(2))/2;
-    fixCoord = [centerRect(1)-fixBox centerRect(2)-fixBox ...
-        centerRect(3) + fixBox centerRect(4)+fixBox]; %fixation caculation
+    fixSizePx = angle2pixel(params.fixRectSize, Resolution(1), params);
+    fixRect = round(CenterRectOnPointd([0 0 fixSizePx fixSizePx], cx, cy));
 
-    eccP = round(ppd*params.ecc, 0);
+    eccP = angle2pixel(params.ecc, Resolution(1), params);
 
-    cueSizeP = round(ppd*params.cueSize,0);
-    gaborPat.size = round(ppd*params.stimSize,0);
-    gaborPat.sd = round(gaborPat.size/4,0);          
+    cueSizeP = angle2pixel(params.cueSize, Resolution(1), params);
+    gaborPat.size = stimSizeP;
+    % Convert Gaussian sigma to pixels and frequency to cycles/image
+    stimPxPerDeg = stimSizeP / params.stimSize;
+    gaborPat.sd = max(1, round(params.gaborSD * stimPxPerDeg));
 
     ListenChar(2); % PTB function to suppress keypresses from 
     % presses CTRL+C to reenable keyboard input.
@@ -122,11 +151,11 @@ try
     Filename = fullfile(saveFolder, sprintf('S%03d_GaborSearch.csv', subNo));
     Metadataname = fullfile(saveFolder, sprintf('S%03d_Params_GaborSearch.txt', subNo));
 
-    % Columns 1-40 match ReferenceCodes/GaborSearch.m in name, order and
-    % meaning so both scripts share the same analysis pipeline. Columns 41+
+    % Columns 1-37 match ReferenceCodes/GaborSearch.m in name, order and
+    % meaning so both scripts share the same analysis pipeline. Columns 38+
     % are RIFT-specific extras.
-    Header = {'subID', 'eyelink', 'run', 'block', 'trial', 'type', 'wheelType', ...
-        'eccentricity', 'degOrient', 'ppd', ...
+    Header = {'subID', 'eyelink', 'run', 'block', 'trial', ...
+        'eccentricity', 'degOrient', ...
         'tarColor', 'tarOrient', 'dstr1Color', 'dstr1Orient', ...
         'color1', 'color2', 'color3', 'color4', ...
         'orient1', 'orient2', 'orient3', 'orient4', ...
@@ -135,9 +164,8 @@ try
         'response', 'right', 'wrong', ...
         'startTime', 'cueTime', 'fixTime2', 'testTime', 'decTime', ...
         'fixTime3', 'fixTime1', ...
-        'proPixx', 'responseTime', 'stimDuration', 'stimFrames', ...
+        'ppd', 'proPixx', 'responseTime', 'stimDuration', 'stimFrames', ...
         'responded', 'valid', 'triggerCode', 'triggerTime', 'schemaVersion'};
-
 
     %% RIFT Tag Settings, render the tag textures for target and distractor
     freqstim = 8; % 480hz / 60Hz
@@ -146,17 +174,17 @@ try
     gaborTargetDotTexture = cell(1, freqstim);
     for i = 1:freqstim
         gaborTargetTagTexture{i} = Screen('MakeTexture', w, ...
-            makeGaborRIFT(gaborPat, bgColor, freqstim, i-1, 1, 0)); %gaborpat, colorBG, freqRIFT, frames, ratio, isvalid
+            makeRIFTtag(gaborPat, bgColor, freqstim, i-1, 1, 0)); %gaborpat, colorBG, freqRIFT, frames, ratio, isvalid
         gaborTargetDotTexture{i} = Screen('MakeTexture', w, ...
-            makeGaborRIFT(gaborPat, bgColor, freqstim, i-1, 0.3, 1));
+            makeRIFTtag(gaborPat, bgColor, freqstim, i-1, 0.3, 1));
     end
     gaborDistractTagTexture = cell(1, freqdistfull);
     gaborDistractDotTexture = cell(1, freqdistfull);
     for i = 1:freqdistfull
         gaborDistractTagTexture{i} = Screen('MakeTexture', w, ...
-            makeGaborRIFT(gaborPat, bgColor, freqdistfull/2, i-1, 1, 0));
+            makeRIFTtag(gaborPat, bgColor, freqdistfull/2, i-1, 1, 0));
         gaborDistractDotTexture{i} = Screen('MakeTexture', w, ...
-            makeGaborRIFT(gaborPat, bgColor, freqdistfull/2, i-1, 0.3, 1));
+            makeRIFTtag(gaborPat, bgColor, freqdistfull/2, i-1, 0.3, 1));
     end
     %% RIFT Tag Settings End
 
@@ -165,79 +193,32 @@ try
     Screen('WindowKind', stimWin);
     arcFixation(stimWin, cx, cy, ppd, 99, params);
     fiximage = Screen('GetImage', stimWin);
-    fiximageTexture = Screen('MakeTexture',w, fiximage)
+    fiximageTexture = Screen('MakeTexture',w, fiximage);
     fiximage4 = quadrantLayout(fiximage, fiximage, fiximage, fiximage, w, bgColor);
-    fiximage4Texture = Screen('MakeTexture',w, fiximage4)
+    fiximage4Texture = Screen('MakeTexture',w, fiximage4);
     Screen('Close', stimWin);
 
+    ringThicknessPix = 6;
+    ringTexture = Screen('MakeTexture', w, ...
+        makeCircle(gaborPat.size, ringThicknessPix));
 
     %% Exp Start
+    % Open calibration audio once for all runs
+    if EL == 1
+        InitializePsychSound;
+        pahandle = PsychPortAudio('Open', [], 1, 0, [], 2);
+        audioCleanup = onCleanup(@() PsychPortAudio('Close', pahandle));
+    end
+
     for run = 1:nRun %% change it if the code crashes
-        % Display eye calibration message
-        if run == 1 && EL == 1 % run the eye calibration only for every first run
-            DrawFormattedText(w,double(params.eyeMess),'center','center', ...
-                params.textColor,[],[],[],3);
-            Screen('Flip',w);
-            WaitSecs(0.5);
-            [~,~,mbuttons] = GetMouse; % should i use keyboard?
-            while mbuttons(1) == 0
-                [~,~,mbuttons] = GetMouse;
-            end
-        end
-
-        %%%%%%%%%%%%%%%%%%%%% EYELINK SETUP %%%%%%%%%%%%%%%%%%%%%
-        % Initialize the EyeLink connection only once, at run 1.
-        if run == 1 && EL == 1
-            dummyMode = 0;
-
-            % Initialize EyeLink defaults.
-            InitializePsychSound;
-            el = EyelinkInitDefaults(w);
-
-            el.calibrationtargetsize = 1.5;
-            el.calibrationtargetwidth = 0.75;
-            EyelinkUpdateDefaults(el);
-
-            % Configure calibration and display colors.
-            el.backgroundcolour = bgColor;
-            el.calibrationtargetcolour = params.fixColor;
-            el.foregroundcolour = WhiteIndex(el.window);
-            el.msgfontcolour = params.textColor;
-            el.imgtitlecolour = WhiteIndex(el.window);
-            EyelinkUpdateDefaults(el);            
-            if ~EyelinkInit(dummyMode, 1)
-                cleanup;
-                return;
-            end
-
-            % Configure the sample data sent over the link.
-            Eyelink('Command', ...
-                'link_sample_data=LEFT,RIGHT,GAZE,AREA');
-        end
-
-        % Open a separate EDF file for every run.
         if EL == 1
-            % Perform the initial calibration only in run 1.
-            if run == 1
-                EyelinkDoTrackerSetup(el);
-                EyelinkDoDriftCorrection(el);
-            end
-
-
-            Eyelink('Command', 'set_idle_mode');
-            Eyelink('Command', 'clear_screen %d', 0);
-            WaitSecs(0.05);
-
-            % Open a separate EDF file for each run.
-            edfFile = sprintf('S%03dR%d.edf', subNo, run);
-            edfPath = fullfile(saveFolderEL, edfFile);
-            Eyelink('Openfile', edfFile);
+            edfName = sprintf('S%03dR%d.edf', subNo, run);
+            setupEyeTracker(w, edfName, run, params, pahandle);
+            edfActive = true;
         end
-        %%%%%%%%%%%%%%%%%%%% EYELINK FILE SETUP End %%%%%%%%%%%%%%%%
-
 
         % prompt message for the start of the run
-        Screen('TextSize',w,fontSizeP/2);
+        Screen('TextSize',w,round(fontSizeP/2));
         Screen('FillRect',w,bgColor);
         DrawFormattedText(w,double(params.waitMess),cx/2-50,cy/2, ...
             params.textColor,[],[],[],3);
@@ -255,13 +236,8 @@ try
         WaitSecs(2);
 
         if EL == 1
-            Eyelink('Command','set_idle_mode');
-            WaitSecs(0.05);
-            % Start recording eye position
             Eyelink('StartRecording');
-            WaitSecs(0.1); %wait a moment for recording to have definitely started
-            % Mark when the experiment has actually started
-            Eyelink('Message','SYNCTIME');
+            WaitSecs(params.eye.recordDelay);
         end
         % Get experiment start time since startup
         startt = GetSecs();
@@ -269,13 +245,21 @@ try
         Screen('Drawtexture', w, fiximage4Texture); % display fixation
         fixTime1 = Screen('Flip',w);
         if EL == 1
-            Eyelink('Message','fixTime1');
+            Eyelink('Message', 'Fix 1 Display');
         end
 
+        if ProPixx == 1
+            initProPixx(1);
+        end
+        
         for block = 1:nBlock
             dstr1Prop = [params.dstr1ColorSet; params.dstr1OrientSet]; %dstr1 parameters
             dstr1Prop = dstr1Prop(:,randperm(nSearch));
             for trial = 1:nTrial
+                trialNo = (block-1)*nTrial + trial;
+                if EL == 1
+                    Eyelink('Message', 'TRIALID %d', trialNo);
+                end
                 ResponseTime = NaN;
                 stimulusOnsetTime = NaN;
                 stimulusOffsetTime = NaN;
@@ -316,13 +300,10 @@ try
                 options = [30, 60];
                 degree = options(randi(2));
                 locSets = nan(nStimSearch,4);
-                coord = nan(nStimSearch,4);
                 for i = 1:nStimSearch
                     locSets(i,:) = round(CenterRectOnPointd(baseRect, ...
                         cx+cosd(degree+(360/nStimSearch)*(i-1))*eccP, ...
                         cy-sind(degree+(360/nStimSearch)*(i-1))*eccP));
-                    coord(i,:) = [locSets(i,1)-ELBox locSets(i,2)-ELBox ...
-                        locSets(i,3)+ELBox locSets(i,4)+ELBox];
                 end
                 locSets2 = nan(nStimSearch,4);
                 for i = 1:nStimSearch
@@ -331,25 +312,9 @@ try
                         cy-sind(degree+(360/nStimSearch)*(i-1))*eccP));
                 end
 
-                if EL == 1
-                    % Clear tracker display
-                    Eyelink('Command','clear_screen %d',0);
-                    WaitSecs(0.05);
-                    % Draw interest area box on host pc
-                    Eyelink('Command','draw_box %d %d %d %d 15',...
-                    fixCoord(1,1),fixCoord(1,2),fixCoord(1,3),fixCoord(1,4));
-                    for i = 1:size(coord,1)
-                        Eyelink('Command','draw_box %d %d %d %d 15',...
-                        coord(i,1),coord(i,2),coord(i,3),coord(i,4));
-                    end
-                    Eyelink('Message', 'TRIALID %d', trial+nTrial*(block-1));
-                    Eyelink('Command','record_status_message "TRIAL %d/%d"',...
-                        trial+nTrial*(block-1),nTrial*nBlock);
-                end
-
                 % Display target cue
-                xCoords = [cueSizeP*sind(tarOrient)/2 -cueSizeP*sind(tarOrient)/2];
-                yCoords = [-cueSizeP*cosd(tarOrient)/2 cueSizeP*cosd(tarOrient)/2];
+                xCoords = [cueSizeP/2 -cueSizeP/2] * cosd(tarOrient);
+                yCoords = [-cueSizeP/2 cueSizeP/2] * sind(tarOrient);
                 Screen('DrawLines',w,[xCoords; yCoords],params.lineWidthPix/2, ...
                     colVec(tarColor,:)*255,[cx/2 cy/2],2);
                 Screen('DrawLines',w,[xCoords; yCoords],params.lineWidthPix/2, ...
@@ -361,18 +326,16 @@ try
                 
                 cueTime = Screen('Flip',w,fixTime1+params.fixDur-ifi/2);
                 if EL == 1
-                    Eyelink('Message','cueTime');
+                    Eyelink('Message', 'Cue Display');
                 end
 
                 % Display fixation
                 Screen('Drawtexture', w, fiximage4Texture);
                 fixTime2 = Screen('Flip',w,cueTime+cueDur-ifi/2);
                 if EL == 1
-                    Eyelink('Message','fixTime2');
+                    Eyelink('Message', 'Fix 2 Display');
                 end
                 
-                % testTime = 999;                 % OLD: stimulus onset is now saved in the testTime column
-                % number = randperm(4);           % OLD: displayed labels are now saved as num1..num4
                 index = randperm(4);
                 locIndex = randperm(4);
                 loca1 = locIndex(1);
@@ -380,9 +343,35 @@ try
                 loca3 = locIndex(3);
                 loca4 = locIndex(4);
                 Ans = [0 0];
+                if EL == 1
+                    Eyelink('Command', 'record_status_message "BLOCK %d TRIAL %d/%d"', ...
+                        block, trial, nTrial);
+                    % Draw interest areas without expanding stimulus rectangles
+                    Eyelink('Command', 'clear_screen 0');
+                    Eyelink('Command', 'draw_box %d %d %d %d %d', fixRect(1), fixRect(2), fixRect(3), fixRect(4), params.fixBoxColor);
+                    Eyelink('Message', '!V FILLBOX %d %d %d %d %d %d %d', ...
+                        params.fixIARGB(1), params.fixIARGB(2), params.fixIARGB(3), ...
+                        fixRect(1), fixRect(2), fixRect(3), fixRect(4));
+                    Eyelink('Message', '!V IAREA RECTANGLE %d %d %d %d %d %d', ...
+                        9, fixRect(1), fixRect(2), fixRect(3), fixRect(4), params.fixIA);
+
+                    % Label target and distractors by stimulus identity
+                    for stimIdx = 1:nStimSearch
+                        stimRect = locSets(index(locIndex(stimIdx)), :);
+                        Eyelink('Command', 'draw_box %d %d %d %d %d', stimRect(1), stimRect(2), stimRect(3), stimRect(4), params.stimBoxColors(stimIdx));
+                        iaRGB = params.stimIARGB(stimIdx, :);
+                        Eyelink('Message', '!V FILLBOX %d %d %d %d %d %d %d', ...
+                            iaRGB(1), iaRGB(2), iaRGB(3), ...
+                            stimRect(1), stimRect(2), stimRect(3), stimRect(4));
+                        Eyelink('Message', '!V IAREA RECTANGLE %d %d %d %d %d %d', ...
+                            stimIdx, stimRect(1), stimRect(2), stimRect(3), stimRect(4), stimIdx);
+                    end
+                end
                 stimWin = Screen('OpenOffscreenWindow', w, bgColor);
                 Screen('WindowKind', stimWin);
                 Screen('Drawtexture', stimWin, fiximageTexture); % draw fixation
+                numSizePx = angle2pixel(params.numSize, Resolution(1), params);
+                Screen('TextSize', stimWin, numSizePx);
 
                 gaborTarget = Screen('MakeTexture', w, makeGabor(gaborPat,...
                     orientSet(1),bgColor,colVec(colorSet(1),:)*255, bgColor));
@@ -408,7 +397,6 @@ try
                 Screen('Drawtexture', stimWin, gaborNPC2,[],locSets(index(loca4),:)); 
                 DrawFormattedText(stimWin,double(int2str(loca4)),'center','center', ...
                     params.textColor,[],[],[],3,[],locSets(index(loca4),:));
-                                    
                 q1 = Screen('GetImage', stimWin);
                 imagename = quadrantLayout(q1, q1, q1, q1, w, bgColor);
                 imageTexture = Screen('MakeTexture', w, imagename);
@@ -422,15 +410,16 @@ try
                     screenX/4,   screenY*3/4;  
                     screenX*3/4, screenY*3/4  
                 ];
-                
-                baseOffsets = [-1/5 * screenX, 1/5 * screenX];
+
+                baseOffsets = [-19/80 * screenX, 19/80 * screenX];
+
                 DotRects = @(i, n) ...
                     CenterRectOnPoint( ...
                         [0, 0, ...
                         (locSets2(index(n),3) - locSets2(index(n),1)) * 0.5, ... 
-                        (locSets2(index(n),4) - locSets2(index(n),2)) * 0.5], ...  
+                        (locSets20(index(n),4) - locSets2(index(n),2)) * 0.5], ...  
                         quadrantCenters(i,1) + baseOffsets(n), ...                 
-                        quadrantCenters(i,2) + 1/5 * screenY ...                   
+                        quadrantCenters(i,2) + 9/40 * screenY ...                   
                     );
 
                 tagRects = @(i,q) ...
@@ -442,9 +431,12 @@ try
                             0.5*((locSets2(index(q),1)+locSets2(index(q),3))/2-screenX/2), ...
                         quadrantCenters(i,2) + ...
                             0.5*((locSets2(index(q),2)+locSets2(index(q),4))/2-screenY/2));
+                        
+
+
 
                 for frames = 1:600
-                    Screen('DrawTexture', w, imageTexture);
+                Screen('DrawTexture', w, imageTexture);                    
                     for i = 1:4             
                         targetPhase = mod((frames-1)*4 + i-1, freqstim) + 1;
                         distractorPhase = mod((frames-1)*4 + i-1, freqdistfull) + 1;
@@ -453,33 +445,45 @@ try
 
                         Screen('DrawTexture', w, gaborDistractTagTexture{distractorPhase}, ...
                             [], tagRects(i,loca2));
-                        
+
                         Screen('DrawTexture', w, gaborTargetDotTexture{targetPhase}, ...
                             [], DotRects(i, 1));
 
                         Screen('DrawTexture', w, gaborDistractDotTexture{distractorPhase}, ...
                             [], DotRects(i, 2));
+
+                        %Screen('DrawTexture', w, ringTexture, [], tagRects(i,loca1));
+                        %Screen('DrawTexture', w, ringTexture, [], tagRects(i,loca2));
+                        %Screen('DrawTexture', w, ringTexture, [], tagRects(i,loca3));
+                        %Screen('DrawTexture', w, ringTexture, [], tagRects(i,loca4));
                     end
                     if frames == 1
                         stimulusVblTime = Screen('Flip',w, ...
                             fixTime2+params.fixDur-ifi/2);
+                        if useTrigger == 1
+                            MEGTrigger(device, 1); % send trigger
+                        end
                     else
                         stimulusVblTime = Screen('Flip',w);
                     end
                     if isnan(stimulusOnsetTime)
                         stimulusOnsetTime = stimulusVblTime;
                         if EL == 1
-                            Eyelink('Message','testTime');
+                            Eyelink('Message', 'Stim Display');
                         end
                     end
                     stimulusFrameCount = stimulusFrameCount + 1;
 
                     [~,respSecs,KeyCode] = KbCheck;   % respSecs = response time (GetSecs)
+                    checkQuitKey(KeyCode, params.exitKey);
                     if sum(KeyCode([one;two;three;four])) ~= 0
                         Screen('Drawtexture', w, fiximage4Texture);
                         stimulusOffsetTime = Screen('Flip',w);
                         responseDetected = true;
                         decTime = respSecs;   % align decTime with GaborSearch.m (response time)
+                        if EL == 1
+                            Eyelink('Message', 'Response');
+                        end
                         choice = [1 2 3 4] * ...
                             [KeyCode(one) KeyCode(two) KeyCode(three) KeyCode(four)]';%'
 
@@ -492,7 +496,6 @@ try
                         end
                         ResponseTime = frames/120;
                         break
-                    else
                     end
                 end
                 if ~responseDetected
@@ -505,60 +508,25 @@ try
                 fixTime3 = stimulusOffsetTime;
                 stimulusDuration = stimulusOffsetTime - stimulusOnsetTime;
                 if EL == 1
-                    Eyelink('Message','fixTime3');
-                    Eyelink('Message','!V IAREA RECTANGLE %d %d %d %d %d %d',1, ...
-                        fixCoord(1,1),fixCoord(1,2), ...
-                        fixCoord(1,3),fixCoord(1,4), ...
-                        99);
-                    loclabel = 1:nStimSearch;
-                    for i = 1:nStimSearch
-                        Eyelink('Message','!V IAREA RECTANGLE %d %d %d %d %d %d',i, ...
-                            coord(index(i),1),coord(index(i),2), ...
-                            coord(index(i),3),coord(index(i),4), ...
-                            loclabel(i));
-                    end
-                    Eyelink('Message','!V TRIAL_VAR subID %d',subNo);
-                    Eyelink('Message','!V TRIAL_VAR run %d',run);
-                    Eyelink('Message','!V TRIAL_VAR block %d',block);
-                    Eyelink('Message','!V TRIAL_VAR trial %d',trial);
-                    Eyelink('Message','!V TRIAL_VAR degOrient %d',degree);
-                    Eyelink('Message','!V TRIAL_VAR tarColor %d',tarColor);
-                    Eyelink('Message','!V TRIAL_VAR tarOrient %d',tarOrient);
-                    Eyelink('Message','!V TRIAL_VAR dstr1Color %d',dstr1Color);
-                    Eyelink('Message','!V TRIAL_VAR dstr1Orient %d',dstr1Orient);
-                    Eyelink('Message','!V TRIAL_VAR right %d',Ans(1));
+                    Eyelink('Message', 'Fix 3 Display');
+                    % Keep identifiers only; read conditions from the behavior log
+                    Eyelink('Message', '!V TRIAL_VAR subID %d', subNo);
+                    Eyelink('Message', '!V TRIAL_VAR run %d', run);
+                    Eyelink('Message', '!V TRIAL_VAR block %d', block);
+                    Eyelink('Message', '!V TRIAL_VAR trial %d', trial);
+                    Eyelink('Message', 'TRIAL_RESULT 0');
                 end
                 Screen('Close', [gaborTarget, gaborDistract, ...
                     gaborNPC1, gaborNPC2, imageTexture]);
                 Screen('Close', stimWin);
 
-
-                % =====================================================================
-                % OLD (replaced) trial-data assembly:
-                % TrialData = [subNo, EL, run, block, trial, ...
-                %     params.ecc, degree, ppd, ...
-                %     tarColor, tarOrient, dstr1Color, dstr1Orient, ...
-                %     colorSet, orientSet, index, number, ...
-                %     choice, Ans, ...
-                %     startt, cueTime-startt, fixTime2-startt, ...
-                %     testTime-startt, decTime-startt, ...
-                %     ResponseTime, fixTime3-startt, fixTime1-startt];
-                % savedata(Filename, Header, TrialData, Metadataname, Metadata);
-                % =====================================================================
-
-                % RIFT is search-only: type = 4 (search), wheelType = 999, matching
-                % the convention used by ReferenceCodes/GaborSearch.m search trials.
-                trialType = 4;
-                wheelType = 999;
-
-                % Per-trial flags and reserved columns (triggers are wired up later).
                 responded    = double(responseDetected);
                 valid        = 1;      % set to 0 if a frame drop or early response is detected (future)
                 triggerCode  = 0;      % reserved for MEG trigger integration
                 triggerTime  = NaN;    % reserved: GetSecs() at trigger send time
 
-                TrialData = [subNo, EL, run, block, trial, trialType, wheelType, ...
-                    params.ecc, degree, ppd, ...
+                TrialData = [subNo, EL, run, block, trial, ...
+                    params.ecc, degree, ...
                     tarColor, tarOrient, dstr1Color, dstr1Orient, ...
                     colorSet, orientSet, ...
                     [index(loca1) index(loca2) index(loca3) index(loca4)], ...
@@ -567,50 +535,29 @@ try
                     startt, cueTime-startt, fixTime2-startt, ...
                     stimulusOnsetTime-startt, decTime-startt, ...
                     fixTime3-startt, fixTime3-startt, ...
-                    ProPixx, ResponseTime, stimulusDuration, stimulusFrameCount, ...
+                    ppd, ProPixx, ResponseTime, stimulusDuration, ...
+                    stimulusFrameCount, ...
                     responded, valid, triggerCode, triggerTime, schemaVersion];
-                savedata(Filename, Header, TrialData, Metadataname, Metadata);
 
+                savedata(Filename, Header, TrialData, Metadataname, Metadata);
                 fixTime1 = fixTime3;
             end
 
             WaitSecs(0.5);
-
-            [~,~,KeyCode] = KbCheck;
-            if(KeyCode(params.exitKey) == 1)
-                Screen('CloseAll');
-                ShowCursor;
-                fclose('all');
-                ListenChar(0);
-                Priority(0);
-                error('The experiment is aborted by user.');
-            end
-            KeyCode(KeyCode==1) = 0;
         end
 
         if EL == 1
-            Eyelink('Message','RUN_END %d',run);
-            Eyelink('StopRecording');
-            eyelinkRecording = false;
-            Eyelink('Command','set_idle_mode');
-            WaitSecs(0.5);
-            closeStatus = Eyelink('CloseFile');
-            if closeStatus ~= 0
-                error('GaborSearchRIFT:EyeLinkCloseFileFailed', ...
-                    'Could not close EyeLink data file "%s" (status %d).', ...
-                    edfFile, closeStatus);
-            end
-            eyelinkFileOpen = false;
-            receiveStatus = Eyelink('ReceiveFile',edfFile,edfPath);
-            if receiveStatus < 0
-                error('GaborSearchRIFT:EyeLinkReceiveFileFailed', ...
-                    'Could not receive EyeLink data file "%s" (status %d).', ...
-                    edfFile, receiveStatus);
+            if edfActive
+                closeEyeTracker(edfName, saveFolderEL, false, params);
+                edfActive = false;
+            else
+                Eyelink('StopRecording');
+                Eyelink('SetOfflineMode');
             end
         end
 
         % Display break or end message
-        Screen('TextSize',w,fontSizeP/2); %screen font size for instruction
+        Screen('TextSize',w,round(fontSizeP/2)); %screen font size for instruction
         if run < nRun
             brkMess = ['You completed block ' num2str(run) ' out of ' num2str(nRun) ' blocks.\n ' ...
                 'You can take a break now.'];
@@ -640,11 +587,16 @@ try
             [~,~,mbuttons] = GetMouse;
         end
     end %end run loop
-    Screen('Close', [gaborTargetTagTexture{:}, gaborTargetDotTexture{:}, ...
-        gaborDistractTagTexture{:}, gaborDistractDotTexture{:}]);
-    if EL ==1
-        Eyelink('Shutdown');
-        eyelinkInitialized = false;
+    Screen('Close', [gaborTargetTagTexture{:}, ...
+        gaborDistractTagTexture{:}, ringTexture]);
+
+    %% Close experiment
+    if EL == 1
+        if edfActive
+            closeEyeTracker(edfName, saveFolderEL, true, params);
+        else
+            Eyelink('Shutdown');
+        end
     end
 
     %% The End    
@@ -654,32 +606,18 @@ try
     ListenChar(0);
     Priority(0);
 catch ME
-    if eyelinkInitialized
-        try
-            if eyelinkRecording
-                Eyelink('StopRecording');
+    % Preserve any open EDF before restoring display and input
+    if EL == 1
+        if edfActive
+            try
+                closeEyeTracker(edfName, saveFolderEL, true, params);
+            catch MEedf
+                fprintf(2, 'Could not receive EDF file: %s\n', MEedf.message);
             end
-            Eyelink('Command','set_idle_mode');
-            WaitSecs(0.05);
-            if eyelinkFileOpen
-                Eyelink('CloseFile');
-                eyelinkFileOpen = false;
-                receiveStatus = Eyelink('ReceiveFile',edfFile,edfPath);
-                if receiveStatus < 0
-                    warning('GaborSearchRIFT:EyeLinkReceiveFileFailed', ...
-                        'Could not receive EyeLink data file "%s" during cleanup (status %d).', ...
-                        edfFile, receiveStatus);
-                end
-            end
-        catch cleanupME
-            warning('GaborSearchRIFT:EyeLinkCleanupFailed', ...
-                'EyeLink cleanup failed: %s', cleanupME.message);
         end
         try
             Eyelink('Shutdown');
-        catch cleanupME
-            warning('GaborSearchRIFT:EyeLinkShutdownFailed', ...
-                'EyeLink shutdown failed: %s', cleanupME.message);
+        catch
         end
     end
     Screen('CloseAll');
@@ -687,6 +625,10 @@ catch ME
     fclose('all');
     ListenChar(0);
     Priority(0);
+    if strcmp(ME.identifier, 'GaborSearchRIFT:UserQuit')
+        fprintf('Experiment aborted by q key.\n');
+        return;
+    end
     fprintf(2, '\nGaborSearch failed: %s\n', ME.message);
     if ~isempty(ME.stack)
         fprintf(2, 'File: %s\nLine: %d\n', ME.stack(1).file, ME.stack(1).line);

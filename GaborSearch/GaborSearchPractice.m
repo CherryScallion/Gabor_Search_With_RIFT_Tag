@@ -1,5 +1,5 @@
 function GaborSearchPractice(subNo)
-%Modulated by Cherry Scallion Oct.2026
+%Modulated Shiye Jiang, Oct.2026
 %%%%%%%%%%%%%%%%%%%%
 
 %% Sub ID Input
@@ -24,11 +24,12 @@ end
 
 %% Experiment parameters
 currentFileFolder = fileparts(mfilename("fullpath"));
-targetFolder = fullfile(currentFileFolder, 'search');
-addpath(targetFolder)
+% Add the organized component folders to the MATLAB path.
+componentFolders = {'Params', 'General_Componets', 'Task_Components'};
+for iFolder = 1:numel(componentFolders)
+    addpath(fullfile(currentFileFolder, componentFolders{iFolder}));
+end
 addpath(dataFolder)
-%% here is the path index
-%addpath('./search');
 
 [params, gaborPat] = defineParameters();
 colVec = params.colVec; %color wheel
@@ -184,8 +185,10 @@ try
                 end
 
                 % Display target cue
-                xCoords = [cueSizeP*sind(tarOrient) -cueSizeP*sind(tarOrient)];
-                yCoords = [-cueSizeP*cosd(tarOrient) cueSizeP*cosd(tarOrient)];
+                %% Changed Start
+                xCoords = [cueSizeP -cueSizeP] * cosd(tarOrient);
+                yCoords = [-cueSizeP cueSizeP] * sind(tarOrient);
+                %% Changed End
                 Screen('DrawLines',w,[xCoords; yCoords],params.lineWidthPix, ...
                     colVec(tarColor,:)*255,[cx cy],2);
                 cueTime = Screen('Flip',w,fixTime1+0.35-ifi/2);
@@ -338,4 +341,3 @@ try
     ListenChar(0);
     Priority(0);
 end
-rmpath(targetFolder)
